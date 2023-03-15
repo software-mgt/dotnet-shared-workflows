@@ -1,0 +1,201 @@
+name: net7-package-build
+
+on:  
+  workflow_call:
+    inputs:
+      build:
+        type: string
+        description: Type of Build (build,alpha,main)
+        default: build
+      buildtargetoverrideenabled:
+        type: boolean
+        default: false
+        required: false
+      buildtargetoverridevalue:
+        type: string
+        description: Project(s) to build
+        default: ''
+        required: false
+      exclusions:
+        type: string
+        default: ''
+        required: false
+      net3:
+        type: boolean
+        default: false
+      net5:
+        type: boolean
+        default: false
+      net6:
+        type: boolean
+        default: false
+      emulator:
+        type: string
+        default: ''
+      testdirectory:
+        type: string
+        default: ''
+      solutiondirectory:
+        type: string
+        default: './'
+      packagedirectory:
+        type: string
+        default: './'
+      packagefile:
+        type: string
+        default: 'package.json'
+    secrets:
+      GITHUB_PACKAGE_TOKEN:
+        required: true
+      GITHUB_PACKAGE_USERNAME: 
+        required: true
+
+jobs:
+  build:    
+    name: Build
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ${{ inputs.solutiondirectory }}
+
+    env:
+      GITHUB_PACKAGE_TOKEN: ${{ secrets.GITHUB_PACKAGE_TOKEN }}
+      GITHUB_PACKAGE_USERNAME: ${{ secrets.GITHUB_PACKAGE_USERNAME }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+
+    - uses: actions/checkout@v2
+
+    # Below steps check if a release tag already exists matching the package.json, fails build on match
+    - run: git fetch --all --tags
+
+    - name: Check Release Tags
+      id: deploy_check
+      uses: thebongy/version-check@v1
+      with:
+        file: ${{ inputs.packagefile }}
+        tagFormat: v${version}
+    - name: Version Exists Validation
+      run: echo "Version ${{steps.deploy_check.outputs.releaseVersion}}"
+
+    # Initialise dotnet 3.1 for tests if targeting netcoreapp3.1
+    - name: Setup .Net3.1
+      if: ${{ inputs.net3 }}
+      uses: actions/setup-dotnet@v1
+      with:
+        dotnet-version: 3.1.x
+    
+    # Initialise dotnet 5 for running tests if targeting net5
+    - name: Setup .NET5.0
+      if: ${{ inputs.net5 }}
+      uses: actions/setup-dotnet@v1
+      with:
+        dotnet-version: 5.0.x
+    
+    # Initialise dotnet 6 for running tests if targeting net6
+    - name: Setup .NET6.0
+      if: ${{ inputs.net6 }}
+      uses: actions/setup-dotnet@v1
+      with:
+        dotnet-version: 6.0.x
+
+    # Initialise dotnet
+    - name: Setup .NET7.0
+      uses: actions/setup-dotnet@v1
+      with:
+        dotnet-version: 7.0.x
+
+    # Retrieves Version property from package.json, available as ${{ env.PACKAGE_VERSION }}
+    - name: Get Package Version
+      uses: nyaa8/package-version@v1
+      with:
+        path: ${{ inputs.packagefile }}
+    # Set Version suffix for Alpha packages
+    - name: Set Alpha Suffix
+      if: ${{ inputs.build == 'alpha' }}
+      shell: pwsh
+      run: |
+        $new_version = $env:PACKAGE_VERSION + '-alpha.' + $env:GITHUB_RUN_NUMBER
+        $new_version
+        echo "PACKAGE_VERSION=$new_version" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf-8 -Append
+    # Restore Packages
+    - name: Restore Packages
+      shell: pwsh
+      run: dotnet restore
+
+    # Check for linting error
+    - name: Format Without Exclusions
+      if: ${{ inputs.exclusions == '' }}
+      shell: pwsh
+      run: dotnet format --verify-no-changes --no-restore -v diagnostic
+    - name: Format With Exclusions
+      if: ${{ inputs.exclusions != '' }}
+      shell: pwsh
+      run: dotnet format --verify-no-changes --no-restore -v diagnostic  --exclude ${{ inputs.exclusions }}
+
+    # Build
+    - name: Build Solution
+      if: ${{ inputs.buildtargetoverrideenabled == false }}    
+      shell: pwsh
+      run: dotnet build --no-restore -c Release -p:Version=$env:PACKAGE_VERSION
+    - name: Build Custom
+      if: ${{ inputs.buildtargetoverrideenabled == true }}    
+      shell: pwsh
+      run: dotnet build ${{ inputs.buildtargetoverridevalue }} --no-restore -c Release -p:Version=$env:PACKAGE_VERSION 
+
+
+    # Run Tests
+    - name: Run Tests
+      if: ${{ inputs.buildtargetoverrideenabled == false }}    
+      shell: pwsh
+      working-directory: ${{ inputs.testdirectory }}
+      run : dotnet test --no-build -c Release -p:CollectCoverage=true /p:CoverletOutputFormat=cobertura --collect:"XPlat Code Coverage"
+    - name: Run Custom Tests
+      if: ${{ inputs.buildtargetoverrideenabled == true }}    
+      shell: pwsh
+      working-directory: ${{ inputs.testdirectory }}
+      run : dotnet test -c Release -p:CollectCoverage=true /p:CoverletOutputFormat=cobertura --collect:"XPlat Code Coverage"
+
+    # Run emulator
+    - name: Integration Tests
+      if: ${{ inputs.emulator != '' }}
+      run: ${{ inputs.emulator }}
+
+    # Generate Coverage Report
+    - name: ReportGenerator
+      if: ${{ inputs.build == 'build'}}
+      uses: danielpalme/ReportGenerator-GitHub-Action@5.1.2
+      with:
+        reports: '**/coverage.cobertura.xml'
+        targetdir: 'coveragereport'
+        reporttypes: 'HtmlInline;MarkdownSummary' 
+
+    # Add Coverage Chart Comment
+    - name: Publish coverage summary
+      if: ${{ inputs.build == 'build' }}
+      uses: marocchino/sticky-pull-request-comment@v2
+      with:
+        header: coverage
+        recreate: true
+        path: coveragereport/Summary.md
+
+    # Pack - for Alpha,Main build
+    - name: Pack Project
+      if: ${{ inputs.build != 'build' }}
+      shell: pwsh
+      working-directory: ${{ inputs.packagedirectory }}
+      run: dotnet pack -c Release -p:PackageVersion=$env:PACKAGE_VERSION
+
+    # Push package, but fail if package already exists
+    - name: Push Package to Github Packages
+      if: ${{ inputs.build != 'build' }}
+      shell: pwsh
+      working-directory: ${{ inputs.packagedirectory }}
+      run : dotnet nuget push **/bin/Release/*.nupkg --api-key ${{ secrets.GITHUB_TOKEN }} --source https://nuget.pkg.github.com/cat-home-experts/index.json
+
+    # Release tag if change to main
+    - name: Tag Release in Repository with Release Notes
+      if: ${{ inputs.build == 'main' }}
+      run: gh release create v${{ env.PACKAGE_VERSION}} -F CHANGELOG.md 
