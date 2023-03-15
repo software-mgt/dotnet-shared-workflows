@@ -193,7 +193,7 @@ jobs:
       if: ${{ inputs.build != 'build' }}
       shell: pwsh
       working-directory: ${{ inputs.packagedirectory }}
-      run : dotnet nuget push **/bin/Release/*.nupkg --api-key ${{ secrets.GITHUB_TOKEN }} --source https://nuget.pkg.github.com/cat-home-experts/index.json
+      run : dotnet nuget push **/bin/Release/*.nupkg --api-key ${{ secrets.GITHUB_TOKEN }} --source https://nuget.pkg.github.com/software-mgt/index.json
 
     # Release tag if change to main
     - name: Tag Release in Repository with Release Notes
